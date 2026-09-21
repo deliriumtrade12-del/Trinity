@@ -1,0 +1,14 @@
+name = "aura-trinity"
+main = "src/index.js"
+compatibility_date = "2026-09-21"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "aura-trinity-db"
+database_id = "a39b30d9-1a4a-4361-8910-d04e124df784"
+
+[ai]
+binding = "AI"
+
+[triggers]
+crons = ["0 * * * *"]

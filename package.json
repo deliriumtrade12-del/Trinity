@@ -1,0 +1,14 @@
+{
+  "name": "aura-trinity",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Autonómny AI agent na Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "login": "wrangler login"
+  },
+  "devDependencies": {
+    "wrangler": "^3.104.0"
+  }
+}
