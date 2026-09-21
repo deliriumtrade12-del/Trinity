@@ -7,14 +7,25 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
+function getAdminToken(env) {
+  return env.TRINITY_ADMIN_TOKEN || env.AURA_TRINITY_TOKEN || env.PASSWORD || DEFAULT_ADMIN_TOKEN;
+}
+
+function jsonResponse(data, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      ...CORS_HEADERS,
+      "Content-Type": "application/json; charset=utf-8",
+      ...extraHeaders,
+    },
+  });
+}
+
 function getCookieValue(cookieHeader, name) {
   if (!cookieHeader) return "";
   const match = new RegExp(`(?:^|; )${name}=([^;]*)`).exec(cookieHeader);
   return match ? decodeURIComponent(match[1]) : "";
-}
-
-function getAdminToken(env) {
-  return env.TRINITY_ADMIN_TOKEN || env.AURA_TRINITY_TOKEN || env.PASSWORD || DEFAULT_ADMIN_TOKEN;
 }
 
 function isAuthorized(request, env) {
@@ -25,12 +36,11 @@ function isAuthorized(request, env) {
   }
 
   const cookieHeader = request.headers.get("Cookie") || "";
-  const cookieToken = getCookieValue(cookieHeader, AUTH_COOKIE);
-  return cookieToken === token;
+  return getCookieValue(cookieHeader, AUTH_COOKIE) === token;
 }
 
 function parseJSON(value) {
-  if (!value) return null;
+  if (!value || typeof value !== "string") return null;
   try {
     return JSON.parse(value);
   } catch {
@@ -47,9 +57,16 @@ function parseJSON(value) {
   }
 }
 
+function htmlResponse(html) {
+  return new Response(html, {
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
+}
+
 async function callAI(env, messages, opts = {}) {
-  if (!env.AI || typeof env.AI.run !== "function") {
-    console.error("callAI: env.AI binding missing");
+  const ai = env.AI;
+  if (!ai || typeof ai.run !== "function") {
+    console.error("callAI: env.AI missing");
     return null;
   }
 
@@ -59,10 +76,11 @@ async function callAI(env, messages, opts = {}) {
     "@cf/meta/llama-3.2-3b-instruct",
   ];
 
-  for (let attempt = 0; attempt <= (opts.retries ?? 2); attempt++) {
+  const retries = opts.retries ?? 2;
+  for (let attempt = 0; attempt <= retries; attempt++) {
     const model = models[Math.min(attempt, models.length - 1)];
     try {
-      const result = await env.AI.run(model, {
+      const result = await ai.run(model, {
         messages,
         max_tokens: opts.max_tokens ?? 2048,
         temperature: opts.temperature ?? 0.7,
@@ -81,8 +99,8 @@ async function callAI(env, messages, opts = {}) {
       console.error("AI request failed:", error?.message || String(error));
     }
 
-    if (attempt < (opts.retries ?? 2)) {
-      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+    if (attempt < retries) {
+      await new Promise((resolve) => setTimeout(resolve, 350 * (attempt + 1)));
     }
   }
 
@@ -241,13 +259,12 @@ async function initDB(env) {
   ];
 
   await env.DB.batch(statements.map((sql) => env.DB.prepare(sql)));
-
   await seedDefaults(env);
 }
 
 async function seedDefaults(env) {
-  const personality = await env.DB.prepare("SELECT COUNT(*) AS count FROM personality").first();
-  if (!personality || Number(personality.count) === 0) {
+  const personalityCount = await env.DB.prepare("SELECT COUNT(*) AS count FROM personality").first();
+  if (!personalityCount || Number(personalityCount.count) === 0) {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO personality(trait, value) VALUES (?, ?)").bind("analyticka", "hlboka analyza a logika"),
       env.DB.prepare("INSERT INTO personality(trait, value) VALUES (?, ?)").bind("komunikativna", "jasná a stručná komunikácia"),
@@ -257,8 +274,8 @@ async function seedDefaults(env) {
     ]);
   }
 
-  const state = await env.DB.prepare("SELECT COUNT(*) AS count FROM inner_state").first();
-  if (!state || Number(state.count) === 0) {
+  const stateCount = await env.DB.prepare("SELECT COUNT(*) AS count FROM inner_state").first();
+  if (!stateCount || Number(stateCount.count) === 0) {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO inner_state(key, value) VALUES (?, ?)").bind("curiosity", "70"),
       env.DB.prepare("INSERT INTO inner_state(key, value) VALUES (?, ?)").bind("confidence", "60"),
@@ -269,8 +286,8 @@ async function seedDefaults(env) {
     ]);
   }
 
-  const skills = await env.DB.prepare("SELECT COUNT(*) AS count FROM skills").first();
-  if (!skills || Number(skills.count) === 0) {
+  const skillsCount = await env.DB.prepare("SELECT COUNT(*) AS count FROM skills").first();
+  if (!skillsCount || Number(skillsCount.count) === 0) {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO skills(name, description, level, xp) VALUES (?, ?, ?, ?)").bind("kodovanie", "Programovanie a refaktorovanie", 1, 0),
       env.DB.prepare("INSERT INTO skills(name, description, level, xp) VALUES (?, ?, ?, ?)").bind("architektura", "Návrh systémov a modulov", 1, 0),
@@ -287,9 +304,9 @@ async function saveMessage(env, sessionId, role, content) {
 }
 
 async function getHistory(env, sessionId, limit = 20) {
-  const result = await env.DB.prepare(
-    "SELECT role, content FROM conversations WHERE session_id = ? ORDER BY id DESC LIMIT ?"
-  ).bind(sessionId, limit).all();
+  const result = await env.DB.prepare("SELECT role, content FROM conversations WHERE session_id = ? ORDER BY id DESC LIMIT ?")
+    .bind(sessionId, limit)
+    .all();
   return (result.results || []).reverse();
 }
 
@@ -396,7 +413,7 @@ async function generateThought(env) {
   const knowledge = await env.DB.prepare("SELECT topic FROM knowledge ORDER BY id DESC LIMIT 5").all();
 
   const prompt = [
-    "Stav: zvedavosť " + state.curiosity + ", nálada " + state.mood + ", kreativita " + state.creativity, 
+    "Stav: zvedavosť " + state.curiosity + ", nálada " + state.mood + ", kreativita " + state.creativity,
     "Nedávne myšlienky: " + ((thoughts.results || []).map((t) => String(t.content).slice(0, 80)).join(" | ") || "žiadne"),
     "Nedávne témy: " + ((knowledge.results || []).map((k) => k.topic).join(", ") || "žiadne"),
     "Vygeneruj jednu originálnu a krátku myšlienku, 2-4 vety."
@@ -535,7 +552,7 @@ async function generateCode(env, task, language = "javascript") {
     { role: "user", content: `Napíš ${language} kód pre: ${task}` },
   ]);
 
-  if (!response) return { error: "Ko nebolo možné vygenerovať kód." };
+  if (!response) return { error: "Nepodarilo sa vygenerovať kód." };
   const parsed = parseJSON(response);
   if (parsed && parsed.code) {
     await env.DB.prepare("INSERT INTO code_snippets(title, code, language, description, status) VALUES (?, ?, ?, ?, 'proposed')")
@@ -608,6 +625,8 @@ async function cloudflareAction(env, action, params = {}) {
   if (!token) return { error: "API_TOKEN nie je nastavený." };
 
   const accountId = env.ACCOUNT_ID;
+  if (!accountId) return { error: "ACCOUNT_ID nie je nastavený." };
+
   const endpointMap = {
     list_workers: `/accounts/${accountId}/workers/scripts`,
     list_kv: `/accounts/${accountId}/storage/kv/namespaces`,
@@ -713,13 +732,11 @@ function loginPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ password })
         });
-
         const data = await res.json();
         if (!data.success) {
           errorBox.textContent = data.error || 'Neplatný token';
           return;
         }
-
         window.location.href = '/';
       });
     </script>
@@ -727,7 +744,7 @@ function loginPage() {
 </html>`;
 }
 
-function mainHtml() {
+function appHtml() {
   return `<!doctype html>
 <html lang="sk">
   <head>
@@ -735,7 +752,7 @@ function mainHtml() {
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Aura Trinity</title>
     <style>
-      :root { --bg: #07111d; --bg2: #101a2b; --panel: #111f2d; --border: #20314a; --text: #edf4ff; --muted: #8ca0c1; --primary: #8b5cf6; --secondary: #3b82f6; --good: #4ade80; --warn: #fbbf24; }
+      :root { --bg: #07111d; --bg2: #101a2b; --panel: #111f2d; --border: #20314a; --text: #edf4ff; --muted: #8ca0c1; --primary: #8b5cf6; --secondary: #3b82f6; }
       * { box-sizing: border-box; }
       body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
       .topbar { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, var(--bg2), #12263d); }
@@ -752,7 +769,6 @@ function mainHtml() {
       .panel { display: none; }
       .panel.active { display: block; }
       .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
-      h3 { margin-top: 0; margin-bottom: 10px; }
       .row { display: flex; gap: 8px; flex-wrap: wrap; }
       .tag { background: rgba(59,130,246,0.18); color: #dceaff; border: 1px solid rgba(59,130,246,0.35); border-radius: 999px; padding: 6px 10px; font-size: 12px; }
       input, textarea { width: 100%; padding: 12px 14px; border-radius: 10px; background: #0f1c2b; border: 1px solid var(--border); color: var(--text); margin-top: 8px; }
@@ -761,7 +777,6 @@ function mainHtml() {
       .assistant { border-left: 3px solid var(--secondary); }
       .user { border-left: 3px solid var(--primary); }
       pre { white-space: pre-wrap; overflow: auto; background: rgba(0,0,0,0.2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
-      .hidden { display: none; }
     </style>
   </head>
   <body>
@@ -867,7 +882,7 @@ function mainHtml() {
 
       function logout() {
         document.cookie = 'aura_trinity_auth=; max-age=0; path=/';
-        window.location.reload();
+        location.reload();
       }
 
       async function sendChat() {
@@ -987,7 +1002,6 @@ function mainHtml() {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const isApi = url.pathname.startsWith("/api/");
 
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: CORS_HEADERS });
@@ -1004,41 +1018,30 @@ export default {
             status: 200,
             headers: {
               ...CORS_HEADERS,
-              "Content-Type": "application/json",
+              "Content-Type": "application/json; charset=utf-8",
               "Set-Cookie": `${AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`,
             },
           });
         }
 
-        return new Response(JSON.stringify({ success: false, error: "Neplatný token" }), {
-          status: 401,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-        });
+        return jsonResponse({ success: false, error: "Neplatný token" }, 401);
       } catch {
-        return new Response(JSON.stringify({ success: false, error: "Neplatný formát" }), {
-          status: 400,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-        });
+        return jsonResponse({ success: false, error: "Neplatný formát" }, 400);
       }
     }
 
     if (!isAuthorized(request, env)) {
       if (url.pathname === "/") {
-        return new Response(loginPage(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+        return htmlResponse(loginPage());
       }
-
       if (url.pathname.startsWith("/api/")) {
-        return new Response(JSON.stringify({ error: "Neoprávnený prístup" }), {
-          status: 401,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-        });
+        return jsonResponse({ error: "Neoprávnený prístup" }, 401);
       }
-
-      return new Response(loginPage(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      return htmlResponse(loginPage());
     }
 
     if (request.method === "GET" && url.pathname === "/") {
-      return new Response(mainHtml(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      return htmlResponse(appHtml());
     }
 
     if (url.pathname === "/api/status" && request.method === "GET") {
@@ -1046,7 +1049,7 @@ export default {
       const totalCycles = await getMemory(env, "total_cycles");
       const knowledgeCount = await env.DB.prepare("SELECT COUNT(*) AS count FROM knowledge").first();
       const thoughtsCount = await env.DB.prepare("SELECT COUNT(*) AS count FROM thoughts").first();
-      return Response.json({
+      return jsonResponse({
         status: "online",
         model: DEFAULT_MODEL,
         autonomous: {
@@ -1057,7 +1060,7 @@ export default {
           knowledge_entries: Number(knowledgeCount?.count || 0),
           thoughts: Number(thoughtsCount?.count || 0),
         },
-      }, { headers: CORS_HEADERS });
+      });
     }
 
     if (url.pathname === "/api/chat" && request.method === "POST") {
@@ -1066,7 +1069,7 @@ export default {
         const message = String(body.message || "").trim();
         const sessionId = String(body.session_id || "default");
         if (!message) {
-          return Response.json({ error: "Prázdna správa" }, { headers: CORS_HEADERS });
+          return jsonResponse({ error: "Prázdna správa" }, 400);
         }
 
         await saveMessage(env, sessionId, "user", message);
@@ -1088,7 +1091,7 @@ export default {
 
         const response = await callAI(env, messages, { max_tokens: 4096, temperature: 0.7 });
         if (!response) {
-          return Response.json({ error: "AI nebola dostupná. Skús znova." }, { status: 503, headers: CORS_HEADERS });
+          return jsonResponse({ error: "AI nebola dostupná. Skús znova." }, 503);
         }
 
         await saveMessage(env, sessionId, "assistant", response);
@@ -1099,9 +1102,9 @@ export default {
           await saveKnowledge(env, message.slice(0, 40), response.slice(0, 500), "chat", "conversation", 0.6);
         }
 
-        return Response.json({ response }, { headers: CORS_HEADERS });
+        return jsonResponse({ response });
       } catch (error) {
-        return Response.json({ error: error?.message || String(error) }, { status: 500, headers: CORS_HEADERS });
+        return jsonResponse({ error: error?.message || String(error) }, 500);
       }
     }
 
@@ -1109,9 +1112,9 @@ export default {
       try {
         const body = await request.json();
         const result = await generateCode(env, String(body.task || "").trim(), String(body.language || "javascript"));
-        return Response.json(result || { error: "Generácia zlyhala." }, { headers: CORS_HEADERS });
+        return jsonResponse(result || { error: "Generácia zlyhala." });
       } catch (error) {
-        return Response.json({ error: error?.message || String(error) }, { status: 500, headers: CORS_HEADERS });
+        return jsonResponse({ error: error?.message || String(error) }, 500);
       }
     }
 
@@ -1123,61 +1126,61 @@ export default {
       const thoughts = await env.DB.prepare("SELECT content FROM thoughts ORDER BY id DESC LIMIT 5").all();
       const reflections = await env.DB.prepare("SELECT reflection FROM reflections ORDER BY id DESC LIMIT 5").all();
 
-      return Response.json({
+      return jsonResponse({
         state,
         personality: personality || [],
         skills: skills || [],
         goals: goals.results || [],
         thoughts: thoughts.results || [],
         reflections: reflections.results || [],
-      }, { headers: CORS_HEADERS });
+      });
     }
 
     if (url.pathname === "/api/knowledge" && request.method === "GET") {
       const result = await env.DB.prepare("SELECT * FROM knowledge ORDER BY id DESC LIMIT 50").all();
-      return Response.json({ knowledge: result.results || [] }, { headers: CORS_HEADERS });
+      return jsonResponse({ knowledge: result.results || [] });
     }
 
     if (url.pathname === "/api/goals" && request.method === "GET") {
       const result = await env.DB.prepare("SELECT * FROM goals ORDER BY priority DESC, id DESC LIMIT 30").all();
-      return Response.json({ goals: result.results || [] }, { headers: CORS_HEADERS });
+      return jsonResponse({ goals: result.results || [] });
     }
 
     if (url.pathname === "/api/thoughts" && request.method === "GET") {
       const result = await env.DB.prepare("SELECT * FROM thoughts ORDER BY id DESC LIMIT 30").all();
-      return Response.json({ thoughts: result.results || [] }, { headers: CORS_HEADERS });
+      return jsonResponse({ thoughts: result.results || [] });
     }
 
     if (url.pathname === "/api/evolution" && request.method === "GET") {
       const result = await env.DB.prepare("SELECT * FROM evolution_history ORDER BY id DESC LIMIT 20").all();
-      return Response.json({ evolution: result.results || [] }, { headers: CORS_HEADERS });
+      return jsonResponse({ evolution: result.results || [] });
     }
 
     if (url.pathname === "/api/reflect" && request.method === "POST") {
       const result = await selfReflect(env);
-      return Response.json(result || { status: "ok" }, { headers: CORS_HEADERS });
+      return jsonResponse(result || { status: "ok" });
     }
 
     if (url.pathname === "/api/think" && request.method === "POST") {
       const thought = await generateThought(env);
-      return Response.json({ thought }, { headers: CORS_HEADERS });
+      return jsonResponse({ thought });
     }
 
     if (url.pathname === "/api/github" && request.method === "POST") {
       const body = await request.json();
       const result = await githubAction(env, body.action, body.params || {});
-      return Response.json(result, { headers: CORS_HEADERS });
+      return jsonResponse(result);
     }
 
     if (url.pathname === "/api/cloudflare" && request.method === "POST") {
       const body = await request.json();
       const result = await cloudflareAction(env, body.action, body.params || {});
-      return Response.json(result, { headers: CORS_HEADERS });
+      return jsonResponse(result);
     }
 
     if (url.pathname === "/api/logs" && request.method === "GET") {
       const result = await env.DB.prepare("SELECT * FROM autonomous_log ORDER BY id DESC LIMIT 50").all();
-      return Response.json({ logs: result.results || [] }, { headers: CORS_HEADERS });
+      return jsonResponse({ logs: result.results || [] });
     }
 
     return new Response("Not found", { status: 404, headers: CORS_HEADERS });
